@@ -13,7 +13,7 @@ export default function Chat() {
   ]);
   const [input, setInput] = useState("");
 
-  const handleSend = (e: React.FormEvent) => {
+  const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
 
@@ -24,19 +24,42 @@ export default function Chat() {
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    const currentInput = input;
     setInput("");
 
-    // Simulate system response
-    setTimeout(() => {
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ message: currentInput }),
+      });
+
+      const data = await res.json();
+
+      const aiText =
+        data?.choices?.[0]?.message?.content || "No response from AI";
+
+      const botMessage: Message = {
+        id: Date.now() + 1,
+        text: aiText,
+        sender: "system",
+      };
+
+      setMessages((prev) => [...prev, botMessage]);
+    } catch (error) {
+      console.error(error);
+
       setMessages((prev) => [
         ...prev,
         {
           id: Date.now() + 1,
-          text: "I am an AI assistant. I can help answer questions about editing.",
+          text: "⚠️ Error connecting to AI",
           sender: "system",
         },
       ]);
-    }, 1000);
+    }
   };
 
   return (
