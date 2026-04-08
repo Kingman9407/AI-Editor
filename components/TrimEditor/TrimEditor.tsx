@@ -1,5 +1,5 @@
 import React, { ChangeEvent } from "react";
-import { RotateCcw, CheckCircle2 } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import { formatTime } from "../../utils/formatTime";
 
 interface TrimEditorProps {
@@ -23,20 +23,14 @@ export default function TrimEditor({
     <div className="animate-in fade-in slide-in-from-top-4 space-y-6 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6 backdrop-blur-xl">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold text-white">Trim Video</h3>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onReset}
-            className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
-          >
-            <RotateCcw size={16} />
-            Reset
-          </button>
-          <button className="flex items-center gap-2 rounded-lg bg-green-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-green-500 transition-colors">
-            <CheckCircle2 size={16} />
-            Apply Trim
-          </button>
-        </div>
+        <h3 className="text-lg font-semibold text-white">Trim Range</h3>
+        <button
+          onClick={onReset}
+          className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors"
+        >
+          <RotateCcw size={16} />
+          Reset
+        </button>
       </div>
 
       <div className="space-y-8 pt-4">

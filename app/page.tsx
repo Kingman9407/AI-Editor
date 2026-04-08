@@ -5,6 +5,7 @@ import VideoUpload from "../components/VideoUpload/VideoUpload";
 import VideoPlayer from "../components/VideoPlayer/VideoPlayer";
 import TrimEditor from "../components/TrimEditor/TrimEditor";
 import Chat from "../components/Chat/Chat";
+import ClipVideoTool from "../tools/clipVideo/ClipVideoTool";
 
 export default function VideoEditor() {
   const {
@@ -31,6 +32,7 @@ export default function VideoEditor() {
     handleTrimEndChange,
     resetTrim,
     clearVideo,
+    loadClip,
     toggleEditorMode,
     requestFullscreen,
   } = useVideoPlayer();
@@ -42,6 +44,7 @@ export default function VideoEditor() {
   return (
     <div className="min-h-screen bg-zinc-950 p-4 text-zinc-100 sm:p-8">
       <div className="mx-auto max-w-[1400px]">
+
         {/* Header */}
         <header className="mb-8 flex items-center justify-between">
           <div className="space-y-1">
@@ -62,7 +65,8 @@ export default function VideoEditor() {
 
         {/* Layout Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Left Column (Video + Trim Editor) - Takes up 2 columns */}
+
+          {/* Left Column — Video + Trim + Clip Tool */}
           <div className="lg:col-span-2 flex flex-col gap-6">
             <VideoPlayer
               videoRef={videoRef}
@@ -77,7 +81,7 @@ export default function VideoEditor() {
               onTogglePlay={togglePlay}
               onTimeUpdate={handleTimeUpdate}
               onLoadedMetadata={handleLoadedMetadata}
-              onEnded={() => {}}
+              onEnded={() => { }}
               onProgressClick={handleProgressClick}
               onVolumeChange={handleVolumeChange}
               onToggleMute={toggleMute}
@@ -85,7 +89,7 @@ export default function VideoEditor() {
               onRequestFullscreen={requestFullscreen}
             />
 
-            {/* Trim Editor (only shown in editor mode) */}
+            {/* Trim Range sliders */}
             {isEditorMode && (
               <TrimEditor
                 duration={duration}
@@ -96,12 +100,15 @@ export default function VideoEditor() {
                 onReset={resetTrim}
               />
             )}
+
+            {/* Clip Video Tool — always visible once video is loaded */}
           </div>
 
-          {/* Right Column (Chat) - Takes up 1 column */}
+          {/* Right Column — AI Chat */}
           <div className="lg:col-span-1 h-full lg:h-auto min-h-[500px]">
-             <Chat />
+            <Chat videoFile={videoFile} duration={duration} onClipReady={loadClip} />
           </div>
+
         </div>
       </div>
     </div>

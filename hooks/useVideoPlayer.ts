@@ -148,6 +148,18 @@ export function useVideoPlayer() {
     setVideoFile(null);
   };
 
+  // Load a clipped blob URL into the player (replaces current src)
+  const loadClip = (blobUrl: string) => {
+    setVideoSrc(blobUrl);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setTrimStart(0);
+    setTrimEnd(100);
+    if (videoRef.current) {
+      videoRef.current.currentTime = 0;
+    }
+  };
+
   const toggleEditorMode = () => setIsEditorMode(!isEditorMode);
 
   const requestFullscreen = () => {
@@ -183,6 +195,7 @@ export function useVideoPlayer() {
     handleTrimEndChange,
     resetTrim,
     clearVideo,
+    loadClip,
     toggleEditorMode,
     requestFullscreen,
   };
