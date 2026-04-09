@@ -473,7 +473,7 @@ export default function Chat({
     let seconds: number | null = null;
 
     if (timeTokens.length >= 1) {
-      seconds = parseTimeToSeconds(timeTokens[0]);
+      seconds = parseTimeToSeconds(timeTokens[0]!);
     }
 
     if (!seconds || !Number.isFinite(seconds)) {
