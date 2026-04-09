@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import { useVideoPlayer } from "../hooks/useVideoPlayer";
 import VideoUpload from "../components/VideoUpload/VideoUpload";
 import VideoPlayer from "../components/VideoPlayer/VideoPlayer";
@@ -11,6 +11,7 @@ import EditList from "../components/EditList/EditList";
 import ExportPanel from "../components/ExportPanel/ExportPanel";
 import { buildKeptSegments, normalizeSegments } from "../utils/segments";
 import MediaSidebar from "../components/MediaSidebar/MediaSidebar";
+import { PLAN_CONFIGS, PLAN_ORDER, PlanId } from "../utils/plans";
 
 type TokenUsage = {
   prompt_tokens?: number;
@@ -21,6 +22,21 @@ type TokenUsage = {
 type TokenSource = "chat" | "audio" | "vision";
 
 export default function VideoEditor() {
+  const [planId, setPlanId] = useState<PlanId>("free");
+  const planConfig = PLAN_CONFIGS[planId];
+  const [exportCounts, setExportCounts] = useState<Record<PlanId, number>>({
+    free: 0,
+    plus: 0,
+    pro: 0,
+  });
+  const exportCount = exportCounts[planId];
+  const handleExportSuccess = useCallback((planUsed: PlanId) => {
+    setExportCounts((prev) => ({
+      ...prev,
+      [planUsed]: prev[planUsed] + 1,
+    }));
+  }, []);
+
   const [exporter, setExporter] = useState<
     null | (() => Promise<{ success: boolean; error?: string }>)
   >(null);
@@ -91,6 +107,7 @@ export default function VideoEditor() {
     seekToTime,
   } = useVideoPlayer({
     onTokenUsage: (source, usage) => addTokenUsage(source, usage),
+    analysis: planConfig.analysis,
   });
 
   const normalizedEdits = normalizeSegments(
@@ -135,12 +152,33 @@ export default function VideoEditor() {
               Editing: <span className="font-mono text-zinc-300">{videoFile?.name}</span>
             </p>
           </div>
-          <button
-            onClick={clearVideo}
-            className="rounded-full border border-zinc-800 bg-zinc-900 px-5 py-2.5 text-sm font-medium text-zinc-300 transition-all hover:bg-zinc-800 hover:text-white shadow-xl hover:shadow-blue-900/20"
-          >
-            Upload New
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center rounded-full border border-zinc-800 bg-zinc-900/70 p-1 shadow-xl">
+              {PLAN_ORDER.map((planOption) => {
+                const isActive = planOption === planId;
+                return (
+                  <button
+                    key={planOption}
+                    type="button"
+                    onClick={() => setPlanId(planOption)}
+                    className={`rounded-full px-4 py-1.5 text-xs font-semibold uppercase tracking-wide transition ${
+                      isActive
+                        ? "bg-blue-600 text-white shadow"
+                        : "text-zinc-300 hover:text-white"
+                    }`}
+                  >
+                    {PLAN_CONFIGS[planOption].label}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              onClick={clearVideo}
+              className="rounded-full border border-zinc-800 bg-zinc-900 px-5 py-2.5 text-sm font-medium text-zinc-300 transition-all hover:bg-zinc-800 hover:text-white shadow-xl hover:shadow-blue-900/20"
+            >
+              Upload New
+            </button>
+          </div>
         </header>
 
         {/* Layout Grid */}
@@ -184,6 +222,7 @@ export default function VideoEditor() {
           {/* Right Column (Sidebar + Chat) - Takes up 1 column */}
           <div className="lg:col-span-1 flex flex-col gap-6">
             <MediaSidebar
+              planId={planId}
               videoContext={{
                 name: videoFile?.name ?? "unknown",
                 type: videoFile?.type ?? "unknown",
@@ -205,6 +244,7 @@ export default function VideoEditor() {
             />
             <div className="h-full min-h-[500px]">
              <Chat
+               planId={planId}
                memoryKey={
                  videoFile
                    ? `${videoFile.name}-${videoFile.size}-${videoFile.lastModified}`
@@ -274,6 +314,9 @@ export default function VideoEditor() {
             videoFile={videoFile}
             keptSegments={keptSegments}
             removedSegments={removedSegments}
+            planId={planId}
+            exportCount={exportCount}
+            onExportSuccess={handleExportSuccess}
             registerExporter={(exporterFn) => setExporter(() => exporterFn)}
           />
         </div>

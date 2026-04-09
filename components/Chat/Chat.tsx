@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Send } from "lucide-react";
 import { formatTime } from "../../utils/formatTime";
+import { PLAN_CONFIGS, PlanId } from "../../utils/plans";
 
 interface Message {
   id: string;
@@ -60,6 +61,13 @@ type ModelAction = {
   reason?: string | null;
 };
 
+type ChatMemory = {
+  lastIntent?: string;
+  lastTrim?: { start: number; end: number };
+  clipCount?: number;
+  lastExportAt?: number;
+};
+
 type ChatSession = {
   id: string;
   title: string;
@@ -69,6 +77,7 @@ type ChatSession = {
 };
 
 interface ChatProps {
+  planId: PlanId;
   videoContext?: VideoContext;
   captureFrame?: () => string | null;
   audioSegments?: AudioSegment[];
@@ -120,6 +129,7 @@ const hasDuplicateMessageIds = (input: Message[]) => {
 };
 
 export default function Chat({
+  planId,
   videoContext,
   captureFrame,
   audioSegments = [],
@@ -133,6 +143,7 @@ export default function Chat({
   onAddEdit,
   onTokenUsage,
 }: ChatProps) {
+  const planConfig = PLAN_CONFIGS[planId];
   const defaultMessages = useMemo<Message[]>(
     () => [
       {
@@ -148,12 +159,25 @@ export default function Chat({
   const [status, setStatus] = useState<string | null>(null);
   const [statusLog, setStatusLog] = useState<string[]>([]);
   const [suggestions, setSuggestions] = useState<SuggestionSegment[]>([]);
-  const allowLocalActions = false;
+  const allowLocalEdits = planConfig.chat.allowSimpleEdits;
+  const allowSuggestions = planConfig.clips.allowSuggestions;
+  const allowAutoApply = planConfig.clips.allowAutoApply;
+  const includeAudioContext = planConfig.chat.includeAudio;
+  const includeVisualContext = planConfig.chat.includeVisual;
+  const includeClipContext = planConfig.chat.includeClips;
+  const allowThinking = planConfig.allowThinking;
   const hasLoadedRef = useRef(false);
   const statusScrollRef = useRef<HTMLDivElement | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [memory, setMemory] = useState<ChatMemory | null>(null);
+
+  useEffect(() => {
+    if (!allowSuggestions) {
+      setSuggestions([]);
+    }
+  }, [allowSuggestions]);
 
   const timeRegex =
     /\b(\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2}|\d+(?:\.\d+)?s)\b/g;
@@ -241,6 +265,59 @@ export default function Chat({
       updatedAt: timestamp,
     };
   };
+
+  useEffect(() => {
+    if (!memoryKey) {
+      setMemory(null);
+      return;
+    }
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(`chat:memory:${memoryKey}`);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as ChatMemory;
+        setMemory(parsed);
+        return;
+      } catch {
+        setMemory(null);
+      }
+    } else {
+      setMemory(null);
+    }
+  }, [memoryKey]);
+
+  useEffect(() => {
+    if (!memoryKey) return;
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      `chat:memory:${memoryKey}`,
+      JSON.stringify(memory ?? {})
+    );
+  }, [memoryKey, memory]);
+
+  useEffect(() => {
+    if (!memoryKey) return;
+    if (!edits.length) {
+      setMemory((prev) => {
+        const clipCount = 0;
+        if (!prev) return { clipCount };
+        if ((prev.clipCount ?? 0) === 0 && !prev.lastTrim) return prev;
+        return { ...prev, clipCount, lastTrim: undefined };
+      });
+      return;
+    }
+    const last = edits[edits.length - 1];
+    setMemory((prev) => {
+      const clipCount = edits.length;
+      const lastTrim = { start: last.start, end: last.end };
+      const same =
+        prev?.clipCount === clipCount &&
+        prev?.lastTrim?.start === lastTrim.start &&
+        prev?.lastTrim?.end === lastTrim.end;
+      if (same) return prev;
+      return { ...(prev ?? {}), clipCount, lastTrim };
+    });
+  }, [edits, memoryKey]);
 
   useEffect(() => {
     if (!memoryKey) {
@@ -447,6 +524,37 @@ export default function Chat({
     return `${text.slice(0, maxLength - 3).trim()}...`;
   };
 
+  const updateMemory = (patch: Partial<ChatMemory>) => {
+    setMemory((prev) => ({
+      ...(prev ?? {}),
+      ...patch,
+    }));
+  };
+
+  const buildMemorySummary = (current: ChatMemory | null) => {
+    if (!current) return "";
+    const parts: string[] = [];
+    if (current.lastIntent) {
+      parts.push(`Last request: "${truncateText(current.lastIntent, 60)}"`);
+    }
+    if (current.lastTrim) {
+      parts.push(
+        `Last trim: ${formatTime(current.lastTrim.start)}-${formatTime(
+          current.lastTrim.end
+        )}`
+      );
+    }
+    if (typeof current.clipCount === "number") {
+      parts.push(`Clips: ${current.clipCount}`);
+    }
+    if (current.lastExportAt) {
+      parts.push(
+        `Last export: ${new Date(current.lastExportAt).toLocaleString()}`
+      );
+    }
+    return parts.join(" - ");
+  };
+
   const buildSuggestionMessage = (query: string) => {
     if (!audioSegments.length) {
       const currentTime = videoContext?.currentTime;
@@ -552,6 +660,46 @@ export default function Chat({
     return { message: [header, ...lines].join("\n"), segments: suggestedSegments };
   };
 
+  const buildActionSuggestions = (
+    actions: ModelAction[] | undefined | null
+  ) => {
+    if (!actions?.length) return [] as SuggestionSegment[];
+    return actions
+      .filter((action) => {
+        const type = (action?.type ?? "").toLowerCase();
+        return ["trim", "cut", "remove", "delete"].includes(type);
+      })
+      .map((action) => ({
+        start: Number(action?.start),
+        end: Number(action?.end),
+        note: action?.reason ?? "AI suggestion",
+      }))
+      .filter(
+        (segment) =>
+          Number.isFinite(segment.start) &&
+          Number.isFinite(segment.end) &&
+          segment.start < segment.end
+      );
+  };
+
+  const pushActionSuggestions = (actions: ModelAction[] | undefined | null) => {
+    const nextSuggestions = buildActionSuggestions(actions);
+    if (!nextSuggestions.length) return 0;
+    setSuggestions(nextSuggestions);
+    const lines = nextSuggestions.map(
+      (segment, index) =>
+        `${index + 1}. ${formatTime(segment.start)}-${formatTime(
+          segment.end
+        )} - ${segment.note}`
+    );
+    pushSystemMessage(
+      `I found ${nextSuggestions.length} trim suggestion${
+        nextSuggestions.length > 1 ? "s" : ""
+      }:\n${lines.join("\n")}\nReply with "trim 1" to apply one.`
+    );
+    return nextSuggestions.length;
+  };
+
   const pushSystemMessage = (text: string) => {
     setMessages((prev) => [
       ...prev,
@@ -602,6 +750,7 @@ export default function Chat({
     pushStatus("Starting export...");
     const result = await onRequestExport();
     if (result?.success) {
+      updateMemory({ lastExportAt: Date.now() });
       const note =
         edits.length > 0
           ? "Export complete. Use the Removed Export panel for the collected clips."
@@ -615,10 +764,12 @@ export default function Chat({
     setStatus(null);
   };
 
-  const buildAudioSummary = () => {
+  const buildAudioSummary = (allowVisualFallback: boolean) => {
     if (!audioSegments.length) {
       if (audioStatus === "no-audio") {
-        return "No audio track detected. Relying on visual frames.";
+        return allowVisualFallback
+          ? "No audio track detected. Relying on visual frames."
+          : "No audio track detected.";
       }
       if (audioStatus === "processing") {
         return "Audio transcription is processing.";
@@ -725,6 +876,7 @@ export default function Chat({
       sender: "user",
     };
 
+    updateMemory({ lastIntent: text.trim() });
     setMessages((prev) => [...prev, userMessage]);
     const currentInput = text;
     setInput("");
@@ -739,7 +891,7 @@ export default function Chat({
       return;
     }
 
-    if (allowLocalActions && editIntentRegex.test(currentInput)) {
+    if (allowLocalEdits && editIntentRegex.test(currentInput)) {
       const pickMatch = currentInput.match(suggestionPickRegex);
       if (pickMatch && suggestions.length) {
         const index = Number.parseInt(pickMatch[1], 10) - 1;
@@ -815,7 +967,7 @@ export default function Chat({
       }
     }
 
-    if (allowLocalActions && suggestIntentRegex.test(currentInput)) {
+    if (allowSuggestions && suggestIntentRegex.test(currentInput)) {
       const suggestionResult = buildSuggestionMessage(currentInput);
       pushSystemMessage(suggestionResult.message);
       setSuggestions(suggestionResult.segments);
@@ -840,27 +992,42 @@ export default function Chat({
         trimmedDuration > 0 ? (safeTrimEnd / 100) * trimmedDuration : 0;
 
       pushStatus("Reviewing the timeline and trim range...");
-      if (audioSegments.length) {
-        pushStatus("Scanning speech, music, and background sounds...");
-      } else if (audioStatus === "processing") {
-        pushStatus("Audio is still processing — using visuals for now...");
-      } else if (audioStatus === "no-audio") {
-        pushStatus("No audio track detected — using visuals only...");
+      if (includeAudioContext) {
+        if (audioSegments.length) {
+          pushStatus("Scanning speech, music, and background sounds...");
+        } else if (audioStatus === "processing") {
+          pushStatus("Audio is still processing - using visuals for now...");
+        } else if (audioStatus === "no-audio") {
+          pushStatus("No audio track detected - using visuals only...");
+        }
       }
 
-      pushStatus("Capturing the current frame...");
       const frameDataUrl =
-        videoContext && captureFrame ? captureFrame() : null;
-      pushStatus("Summarizing audio + visuals...");
-      const audioSummary = buildAudioSummary();
-      const clipSummary = buildClipSummary();
-      const visualSummary = buildVisualSummary();
+        includeVisualContext && videoContext && captureFrame
+          ? captureFrame()
+          : null;
+
+      if (includeAudioContext || includeVisualContext || includeClipContext) {
+        pushStatus("Summarizing context...");
+      }
+
+      const audioSummary = includeAudioContext
+        ? buildAudioSummary(includeVisualContext)
+        : "";
+      const clipSummary = includeClipContext ? buildClipSummary() : "";
+      const visualSummary = includeVisualContext ? buildVisualSummary() : "";
+      const memorySnapshot = buildMemorySummary({
+        ...(memory ?? {}),
+        lastIntent: currentInput.trim(),
+      });
 
       pushStatus("Sending context to the AI...");
 
       const requestBody = {
         message: currentInput,
         history: historyForModel,
+        memory: memorySnapshot ? { summary: memorySnapshot } : undefined,
+        allowThinking,
         video: videoContext
           ? {
               name: videoContext.name,
@@ -925,19 +1092,40 @@ export default function Chat({
         "No response from AI";
 
       const parsedActions = data?.parsed?.actions;
-      const appliedCount = applyActionsFromJson(parsedActions);
-      if (appliedCount > 0) {
-        pushStatus(`Applying ${appliedCount} edit${appliedCount > 1 ? "s" : ""}...`);
+      let appliedCount = 0;
+      if (allowAutoApply) {
+        appliedCount = applyActionsFromJson(parsedActions);
+        if (appliedCount > 0) {
+          pushStatus(
+            `Applying ${appliedCount} edit${appliedCount > 1 ? "s" : ""}...`
+          );
+          pushSystemMessage(
+            `Applied ${appliedCount} edit${appliedCount > 1 ? "s" : ""} from AI.`
+          );
+        }
+      } else if (allowSuggestions) {
+        const suggestionCount = pushActionSuggestions(parsedActions);
+        if (suggestionCount > 0) {
+          pushStatus(
+            `Shared ${suggestionCount} trim suggestion${
+              suggestionCount > 1 ? "s" : ""
+            } for review.`
+          );
+        }
+      } else if (parsedActions?.length) {
         pushSystemMessage(
-          `Applied ${appliedCount} edit${appliedCount > 1 ? "s" : ""} from AI.`
+          "Edits are not auto-applied on this plan. Try a simple time range like 00:12-00:18."
         );
       }
 
-      if (parsedActions?.some((action) =>
-        ["export", "render", "combine"].includes(
-          (action?.type ?? "").toLowerCase()
+      if (
+        allowAutoApply &&
+        parsedActions?.some((action) =>
+          ["export", "render", "combine"].includes(
+            (action?.type ?? "").toLowerCase()
+          )
         )
-      )) {
+      ) {
         pushStatus("Starting export...");
         await handleExportRequest();
       }
@@ -986,6 +1174,8 @@ export default function Chat({
     return `Explain what happens in ${range} (${note}).`;
   };
 
+  const memorySummary = buildMemorySummary(memory);
+
   return (
     <div className="flex h-full min-h-[500px] flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50 backdrop-blur-xl shadow-2xl">
       {/* Header */}
@@ -999,6 +1189,15 @@ export default function Chat({
             AI Assistant
           </h2>
           <div className="flex items-center gap-2">
+            <span
+              className={`rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-wide ${
+                allowThinking
+                  ? "border-emerald-400/60 bg-emerald-500/10 text-emerald-200"
+                  : "border-zinc-700 text-zinc-400"
+              }`}
+            >
+              Thinking {allowThinking ? "On" : "Off"}
+            </span>
             <button
               type="button"
               onClick={() => setIsHistoryOpen((prev) => !prev)}
@@ -1021,6 +1220,15 @@ export default function Chat({
           </div>
         </div>
       </div>
+
+      {memorySummary ? (
+        <div className="border-b border-zinc-800 bg-zinc-950/40 px-6 py-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+            Memory
+          </div>
+          <div className="mt-1 text-xs text-zinc-300">{memorySummary}</div>
+        </div>
+      ) : null}
 
       {isHistoryOpen ? (
         <div className="border-b border-zinc-800 bg-zinc-950/40 px-4 py-3">

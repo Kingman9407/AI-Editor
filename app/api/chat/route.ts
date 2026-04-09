@@ -25,6 +25,10 @@ type VisualContext = {
   summary?: string;
 };
 
+type MemoryContext = {
+  summary?: string;
+};
+
 type HistoryMessage = {
   role: "user" | "assistant";
   content: string;
@@ -106,10 +110,12 @@ async function formatToJson({
   raw,
   userMessage,
   videoDuration,
+  allowThinking,
 }: {
   raw: string;
   userMessage?: string;
   videoDuration?: number;
+  allowThinking?: boolean;
 }): Promise<FormatResult> {
   const response = await fetch(
     "https://integrate.api.nvidia.com/v1/chat/completions",
@@ -140,7 +146,7 @@ async function formatToJson({
         max_tokens: 512,
         temperature: 0,
         top_p: 0.1,
-        chat_template_kwargs: { enable_thinking: false },
+        chat_template_kwargs: { enable_thinking: Boolean(allowThinking) },
       }),
     }
   );
@@ -204,7 +210,17 @@ async function describeFrame(frameDataUrl: string) {
 }
 
 export async function POST(req: Request) {
-  const { message, video, frame, audio, visual, clips, history } = (await req.json()) as {
+  const {
+    message,
+    video,
+    frame,
+    audio,
+    visual,
+    clips,
+    history,
+    memory,
+    allowThinking,
+  } = (await req.json()) as {
     message?: string;
     video?: VideoContext;
     frame?: string | null;
@@ -212,6 +228,8 @@ export async function POST(req: Request) {
     visual?: VisualContext;
     clips?: ClipContext;
     history?: HistoryMessage[];
+    memory?: MemoryContext;
+    allowThinking?: boolean;
   };
 
   const editIntentRegex = /\b(trim|cut|remove|delete)\b/i;
@@ -304,6 +322,10 @@ ${clips.summary}`);
 ${visual.summary}`);
   }
 
+  if (memory?.summary) {
+    contextLines.push(`User memory: ${memory.summary}`);
+  }
+
   if (typeof frame === "string" && frame.startsWith("data:image/")) {
     try {
       const frameResult = await describeFrame(frame);
@@ -352,7 +374,7 @@ ${contextLines.join("\n")}`,
         max_tokens: 16384,
         temperature: 1,
         top_p: 0.95,
-        chat_template_kwargs: { enable_thinking: false },
+        chat_template_kwargs: { enable_thinking: Boolean(allowThinking) },
       }),
     }
   );
@@ -372,6 +394,7 @@ ${contextLines.join("\n")}`,
       raw: content,
       userMessage: message,
       videoDuration: video?.duration,
+      allowThinking,
     });
     formatterContent = formatted.content;
     parsed = formatted.parsed;

@@ -42,9 +42,15 @@ type TokenUsageSource = "audio" | "vision";
 
 type UseVideoPlayerOptions = {
   onTokenUsage?: (source: TokenUsageSource, usage: TokenUsage) => void;
+  analysis?: {
+    audio: boolean;
+    visual: boolean;
+  };
 };
 
 export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
+  const enableAudioAnalysis = options.analysis?.audio ?? true;
+  const enableVisualAnalysis = options.analysis?.visual ?? true;
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -128,7 +134,13 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
   }, [videoFile]);
 
   useEffect(() => {
-    if (!videoFile) return;
+    if (!videoFile || !enableAudioAnalysis) {
+      setAudioSegments([]);
+      setAudioStatus("idle");
+      setAudioError(null);
+      setAudioProgress(0);
+      return;
+    }
     let cancelled = false;
 
     const transcribeAudio = async () => {
@@ -280,10 +292,18 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     return () => {
       cancelled = true;
     };
-  }, [videoFile]);
+  }, [videoFile, enableAudioAnalysis]);
 
   useEffect(() => {
-    if (!videoFile || !videoSrc) return;
+    if (!videoFile || !videoSrc || !enableVisualAnalysis) {
+      setVideoInsights([]);
+      setVideoInsightStatus("idle");
+      setVideoInsightError(null);
+      setSceneChanges([]);
+      setSceneStatus("idle");
+      setSceneError(null);
+      return;
+    }
     let cancelled = false;
 
     const captureFrameFromVideo = (video: HTMLVideoElement) => {
@@ -594,7 +614,7 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     return () => {
       cancelled = true;
     };
-  }, [videoFile, videoSrc]);
+  }, [videoFile, videoSrc, enableVisualAnalysis]);
 
   const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
