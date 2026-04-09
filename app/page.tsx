@@ -1,12 +1,49 @@
 "use client";
 
+import React, { useState } from "react";
 import { useVideoPlayer } from "../hooks/useVideoPlayer";
 import VideoUpload from "../components/VideoUpload/VideoUpload";
 import VideoPlayer from "../components/VideoPlayer/VideoPlayer";
 import TrimEditor from "../components/TrimEditor/TrimEditor";
 import Chat from "../components/Chat/Chat";
+import SegmentedPreview from "../components/SegmentedPreview/SegmentedPreview";
+import EditList from "../components/EditList/EditList";
+import ExportPanel from "../components/ExportPanel/ExportPanel";
+import { buildKeptSegments, normalizeSegments } from "../utils/segments";
+import MediaSidebar from "../components/MediaSidebar/MediaSidebar";
+
+type TokenUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+};
+
+type TokenSource = "chat" | "audio" | "vision";
 
 export default function VideoEditor() {
+  const [exporter, setExporter] = useState<
+    null | (() => Promise<{ success: boolean; error?: string }>)
+  >(null);
+  const [tokenUsage, setTokenUsage] = useState({
+    total: 0,
+    chat: 0,
+    audio: 0,
+    vision: 0,
+  });
+  const addTokenUsage = (source: TokenSource, usage?: TokenUsage | null) => {
+    if (!usage) return;
+    const total =
+      typeof usage.total_tokens === "number"
+        ? usage.total_tokens
+        : (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+    if (!total) return;
+    setTokenUsage((prev) => ({
+      total: prev.total + total,
+      chat: source === "chat" ? prev.chat + total : prev.chat,
+      audio: source === "audio" ? prev.audio + total : prev.audio,
+      vision: source === "vision" ? prev.vision + total : prev.vision,
+    }));
+  };
   const {
     videoFile,
     videoSrc,
@@ -18,6 +55,19 @@ export default function VideoEditor() {
     trimStart,
     trimEnd,
     isEditorMode,
+    videoWidth,
+    videoHeight,
+    audioSegments,
+    audioStatus,
+    audioError,
+    audioProgress,
+    videoInsights,
+    videoInsightStatus,
+    videoInsightError,
+    sceneChanges,
+    sceneStatus,
+    sceneError,
+    edits,
     videoRef,
     progressRef,
     handleFileUpload,
@@ -33,7 +83,22 @@ export default function VideoEditor() {
     clearVideo,
     toggleEditorMode,
     requestFullscreen,
-  } = useVideoPlayer();
+    addEdit,
+    clearEdits,
+    undoLastEdit,
+    removeEdit,
+    captureFrame,
+    seekToTime,
+  } = useVideoPlayer({
+    onTokenUsage: (source, usage) => addTokenUsage(source, usage),
+  });
+
+  const normalizedEdits = normalizeSegments(
+    edits.map((edit) => ({ start: edit.start, end: edit.end })),
+    duration
+  );
+  const keptSegments = buildKeptSegments(duration, normalizedEdits);
+  const removedSegments = normalizedEdits;
 
   if (!videoSrc) {
     return <VideoUpload onFileUpload={handleFileUpload} />;
@@ -45,6 +110,24 @@ export default function VideoEditor() {
         {/* Header */}
         <header className="mb-8 flex items-center justify-between">
           <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-wide text-zinc-500">
+              <span>Tokens</span>
+              <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-zinc-200">
+                {tokenUsage.total.toLocaleString()}
+              </span>
+              <span className="text-zinc-500">Chat</span>
+              <span className="font-mono text-zinc-300">
+                {tokenUsage.chat.toLocaleString()}
+              </span>
+              <span className="text-zinc-500">Audio</span>
+              <span className="font-mono text-zinc-300">
+                {tokenUsage.audio.toLocaleString()}
+              </span>
+              <span className="text-zinc-500">Vision</span>
+              <span className="font-mono text-zinc-300">
+                {tokenUsage.vision.toLocaleString()}
+              </span>
+            </div>
             <h1 className="text-3xl font-bold tracking-tight text-white bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
               Video Editor Toolkit
             </h1>
@@ -98,10 +181,101 @@ export default function VideoEditor() {
             )}
           </div>
 
-          {/* Right Column (Chat) - Takes up 1 column */}
-          <div className="lg:col-span-1 h-full lg:h-auto min-h-[500px]">
-             <Chat />
+          {/* Right Column (Sidebar + Chat) - Takes up 1 column */}
+          <div className="lg:col-span-1 flex flex-col gap-6">
+            <MediaSidebar
+              videoContext={{
+                name: videoFile?.name ?? "unknown",
+                type: videoFile?.type ?? "unknown",
+                sizeBytes: videoFile?.size ?? 0,
+                duration,
+                width: videoWidth,
+                height: videoHeight,
+              }}
+              audioSegments={audioSegments}
+              audioStatus={audioStatus}
+              audioError={audioError}
+              audioProgress={audioProgress}
+              videoInsights={videoInsights}
+              videoInsightStatus={videoInsightStatus}
+              videoInsightError={videoInsightError}
+              sceneChanges={sceneChanges}
+              sceneStatus={sceneStatus}
+              sceneError={sceneError}
+            />
+            <div className="h-full min-h-[500px]">
+             <Chat
+               memoryKey={
+                 videoFile
+                   ? `${videoFile.name}-${videoFile.size}-${videoFile.lastModified}`
+                   : undefined
+               }
+               videoContext={{
+                 name: videoFile?.name ?? "unknown",
+                 type: videoFile?.type ?? "unknown",
+                 sizeBytes: videoFile?.size ?? 0,
+                 duration,
+                 width: videoWidth,
+                 height: videoHeight,
+                 currentTime,
+                 trimStart,
+                 trimEnd,
+                 isEditorMode,
+               }}
+               captureFrame={captureFrame}
+               audioSegments={audioSegments}
+               audioStatus={audioStatus}
+               audioError={audioError}
+               videoInsights={videoInsights}
+               sceneChanges={sceneChanges}
+              edits={edits}
+              onTokenUsage={(usage) => addTokenUsage("chat", usage)}
+              onRequestExport={async () => {
+                if (!exporter) {
+                  return {
+                    success: false,
+                     error: "Exporter not ready. Click Load FFmpeg & Export once.",
+                   };
+                 }
+                 return exporter();
+               }}
+               onAddEdit={addEdit}
+             />
+            </div>
           </div>
+        </div>
+
+        <div className="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <SegmentedPreview
+            title="Trimmed Preview"
+            videoSrc={videoSrc}
+            segments={keptSegments}
+            emptyLabel="No trims yet. Ask the AI to remove a segment."
+          />
+          <SegmentedPreview
+            title="Removed Preview"
+            videoSrc={videoSrc}
+            segments={removedSegments}
+            emptyLabel="No removed segments yet."
+          />
+        </div>
+
+        <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <EditList
+            edits={edits}
+            videoSrc={videoSrc}
+            previewSegments={normalizedEdits}
+            onSelect={(time) => seekToTime(time, true)}
+            onUndoLast={undoLastEdit}
+            onRemove={removeEdit}
+            onClear={clearEdits}
+          />
+          <ExportPanel
+            videoFile={videoFile}
+            keptSegments={keptSegments}
+            removedSegments={removedSegments}
+            registerExporter={(exporterFn) => setExporter(() => exporterFn)}
+          />
         </div>
       </div>
     </div>
