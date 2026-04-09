@@ -1,10 +1,15 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
-import React, { useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { fetchFile, toBlobURL } from "@ffmpeg/util";
 import { Segment } from "../../utils/segments";
 import { PLAN_CONFIGS, PlanId } from "../../utils/plans";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface ExportPanelProps {
   videoFile: File | null;
@@ -18,66 +23,231 @@ interface ExportPanelProps {
   ) => void;
 }
 
-/**
- * Build an FFmpeg filter_complex string that trims + concatenates segments.
- * Handles the case where there is no audio stream in the video.
- */
-const buildFilter = (segments: Segment[], hasAudio: boolean): string => {
-  const parts: string[] = [];
+type ExportResult = { url: string; name: string } | null;
+type Quality = "fast" | "standard" | "high";
 
-  segments.forEach((segment, index) => {
-    parts.push(
-      `[0:v]trim=start=${segment.start}:end=${segment.end},setpts=PTS-STARTPTS[v${index}]`
-    );
-    if (hasAudio) {
-      parts.push(
-        `[0:a]atrim=start=${segment.start}:end=${segment.end},asetpts=PTS-STARTPTS[a${index}]`
-      );
-    }
-  });
+interface QualityOption {
+  id: Quality;
+  label: string;
+  desc: string;
+  bitrate: number;
+  maxHeight?: number;
+  codec: string;
+}
 
-  const concatVideoInputs = segments.map((_, i) => `[v${i}]`).join("");
-  const concatAudioInputs = hasAudio
-    ? segments.map((_, i) => `[a${i}]`).join("")
-    : "";
+// ─────────────────────────────────────────────────────────────────────────────
+// Quality presets
+// ─────────────────────────────────────────────────────────────────────────────
 
-  if (hasAudio) {
-    parts.push(
-      `${concatVideoInputs}${concatAudioInputs}concat=n=${segments.length}:v=1:a=1[outv][outa]`
-    );
-  } else {
-    parts.push(
-      `${concatVideoInputs}concat=n=${segments.length}:v=1:a=0[outv]`
-    );
-  }
+const QUALITY_OPTIONS: QualityOption[] = [
+  {
+    id: "fast",
+    label: "Fast",
+    desc: "720p · 2 Mbps · GPU ultrafast",
+    bitrate: 2_000_000,
+    maxHeight: 720,
+    codec: "avc1.420028",
+  },
+  {
+    id: "standard",
+    label: "Standard",
+    desc: "Original · 4 Mbps",
+    bitrate: 4_000_000,
+    codec: "avc1.640028",
+  },
+  {
+    id: "high",
+    label: "High",
+    desc: "Original · 8 Mbps",
+    bitrate: 8_000_000,
+    codec: "avc1.640033",
+  },
+];
 
-  return parts.join(";");
-};
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Probe whether a video file has an audio stream by inspecting its file bytes.
- * We run `ffprobe`-equivalent logic via ffmpeg itself – write a tiny segment
- * and check stderr for "Audio:" in the stream info.
- * Simpler approach: we just attempt a no-op audio probe using ffmpeg exec.
- */
-const probeHasAudio = async (ffmpeg: FFmpeg, inputName: string): Promise<boolean> => {
-  // Run a 0-second null mux and check if it succeeds with audio mapping
+function webCodecsAvailable(): boolean {
   try {
-    const logs: string[] = [];
-    ffmpeg.on("log", ({ message }) => logs.push(message));
-    await ffmpeg.exec([
-      "-i", inputName,
-      "-t", "0",
-      "-map", "0:a",
-      "-f", "null",
-      "-",
-    ]);
-    ffmpeg.off("log", () => {});
-    return true;
+    return (
+      typeof VideoEncoder !== "undefined" &&
+      typeof VideoDecoder !== "undefined"
+    );
   } catch {
     return false;
   }
+}
+
+function audioEncAvailable(): boolean {
+  try {
+    return typeof AudioEncoder !== "undefined";
+  } catch {
+    return false;
+  }
+}
+
+function sumDuration(segs: Segment[]): number {
+  return segs.reduce((a, s) => a + s.end - s.start, 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WebCodecs export — Mediabunny Worker pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function exportWithWebCodecs(
+  file: File,
+  segments: Segment[],
+  quality: QualityOption,
+  label: string,
+  onProgress: (pct: number, label: string) => void
+): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./export.worker.ts", import.meta.url), {
+      type: "module",
+    });
+
+    worker.onmessage = (e) => {
+      const data = e.data;
+      if (data.type === "progress") {
+        onProgress(data.percent, data.message);
+      } else if (data.type === "done") {
+        worker.terminate();
+        resolve(data.blob);
+      } else if (data.type === "error") {
+        worker.terminate();
+        reject(new Error(data.error));
+      }
+    };
+
+    worker.onerror = (e) => {
+      worker.terminate();
+      reject(e);
+    };
+
+    worker.postMessage({
+      type: "start",
+      file,
+      segments: segments.map((s) => ({ start: s.start, end: s.end })),
+      quality,
+      label,
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FFmpeg.wasm fallback — used automatically on Firefox / Safari < 16.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+const buildFilter = (segs: Segment[], hasAudio: boolean): string => {
+  const parts: string[] = [];
+  segs.forEach((s, i) => {
+    parts.push(
+      `[0:v]trim=start=${s.start}:end=${s.end},setpts=PTS-STARTPTS[v${i}]`
+    );
+    if (hasAudio)
+      parts.push(
+        `[0:a]atrim=start=${s.start}:end=${s.end},asetpts=PTS-STARTPTS[a${i}]`
+      );
+  });
+  const vi = segs.map((_, i) => `[v${i}]`).join("");
+  const ai = hasAudio ? segs.map((_, i) => `[a${i}]`).join("") : "";
+  parts.push(
+    hasAudio
+      ? `${vi}${ai}concat=n=${segs.length}:v=1:a=1[outv][outa]`
+      : `${vi}concat=n=${segs.length}:v=1:a=0[outv]`
+  );
+  return parts.join(";");
 };
+
+async function exportWithFFmpeg(
+  ffmpegRef: React.MutableRefObject<FFmpeg | null>,
+  file: File,
+  segments: Segment[],
+  outputName: string,
+  onProgress: (pct: number, label: string) => void
+): Promise<Blob> {
+  onProgress(5, "Loading FFmpeg (fallback for this browser)…");
+
+  if (!ffmpegRef.current) {
+    const ffmpeg = new FFmpeg();
+    ffmpeg.on("progress", ({ progress: p }) =>
+      onProgress(
+        10 + Math.round(p * 70),
+        `Encoding… ${Math.round(p * 100)}%`
+      )
+    );
+    const cdns = [
+      "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm",
+      "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm",
+    ];
+    for (const base of cdns) {
+      try {
+        await ffmpeg.load({
+          coreURL: await toBlobURL(
+            `${base}/ffmpeg-core.js`,
+            "text/javascript"
+          ),
+          wasmURL: await toBlobURL(
+            `${base}/ffmpeg-core.wasm`,
+            "application/wasm"
+          ),
+          workerURL: await toBlobURL(
+            `${base}/ffmpeg-core.worker.js`,
+            "text/javascript"
+          ),
+        });
+        ffmpegRef.current = ffmpeg;
+        break;
+      } catch { }
+    }
+    if (!ffmpegRef.current) throw new Error("Failed to load FFmpeg.");
+  }
+
+  const ff = ffmpegRef.current;
+  const inputName = "input.mp4";
+
+  onProgress(12, "Writing input…");
+  await ff.writeFile(inputName, await fetchFile(file));
+
+  let hasAudio = false;
+  try {
+    await ff.exec(["-i", inputName, "-t", "0", "-map", "0:a", "-f", "null", "-"]);
+    hasAudio = true;
+  } catch { }
+
+  try { await ff.deleteFile(outputName); } catch { }
+
+  onProgress(15, "Encoding with FFmpeg…");
+  if (segments.length === 1) {
+    const s = segments[0]!;
+    await ff.exec([
+      "-y", "-i", inputName,
+      "-ss", String(s.start), "-to", String(s.end),
+      "-c:v", "libx264", "-preset", "ultrafast",
+      ...(hasAudio ? ["-c:a", "aac"] : ["-an"]),
+      outputName,
+    ]);
+  } else {
+    const filter = buildFilter(segments, hasAudio);
+    await ff.exec([
+      "-y", "-i", inputName,
+      "-filter_complex", filter,
+      "-map", "[outv]",
+      ...(hasAudio ? ["-map", "[outa]"] : []),
+      "-c:v", "libx264", "-preset", "ultrafast",
+      ...(hasAudio ? ["-c:a", "aac"] : ["-an"]),
+      outputName,
+    ]);
+  }
+
+  const data = await ff.readFile(outputName);
+  return new Blob([(data as Uint8Array).buffer as ArrayBuffer], { type: "video/mp4" });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExportPanel component
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default function ExportPanel({
   videoFile,
@@ -91,226 +261,217 @@ export default function ExportPanel({
   const planConfig = PLAN_CONFIGS[planId];
   const ffmpegRef = useRef<FFmpeg | null>(null);
 
-  // Stable refs so the callback doesn't need re-registration on every prop change
-  const videoFileRef = useRef<File | null>(videoFile);
-  const keptSegmentsRef = useRef<Segment[]>(keptSegments);
-  const removedSegmentsRef = useRef<Segment[]>(removedSegments);
-  const planIdRef = useRef<PlanId>(planId);
-  const exportLimitRef = useRef(planConfig.exportLimit);
-  const exportCountRef = useRef(exportCount);
-  const onExportSuccessRef = useRef(onExportSuccess);
-  const isExportingRef = useRef(false);
+  const videoFileRef = useRef(videoFile);
+  const keptRef = useRef(keptSegments);
+  const removedRef = useRef(removedSegments);
+  const planIdRef = useRef(planId);
+  const limitRef = useRef(planConfig.exportLimit);
+  const countRef = useRef(exportCount);
+  const successRef = useRef(onExportSuccess);
+  const exportingRef = useRef(false);
 
-  const [isReady, setIsReady] = useState(false);
+  const [quality, setQuality] = useState<Quality>("standard");
   const [isExporting, setIsExporting] = useState(false);
-  const [progress, setProgress] = useState<string>("");
+  const [progressMsg, setProgressMsg] = useState("");
+  const [progressPct, setProgressPct] = useState(0);
   const [error, setError] = useState<string | null>(null);
-
-  type ExportResult = { url: string; name: string } | null;
   const [trimmedResult, setTrimmedResult] = useState<ExportResult>(null);
   const [removedResult, setRemovedResult] = useState<ExportResult>(null);
 
+  const [useGPU] = useState<boolean>(() =>
+    typeof window !== "undefined" ? webCodecsAvailable() : false
+  );
+
+  React.useEffect(() => { videoFileRef.current = videoFile; }, [videoFile]);
+  React.useEffect(() => { keptRef.current = keptSegments; }, [keptSegments]);
+  React.useEffect(() => { removedRef.current = removedSegments; }, [removedSegments]);
+  React.useEffect(() => { planIdRef.current = planId; limitRef.current = planConfig.exportLimit; }, [planId, planConfig.exportLimit]);
+  React.useEffect(() => { countRef.current = exportCount; }, [exportCount]);
+  React.useEffect(() => { successRef.current = onExportSuccess; }, [onExportSuccess]);
+
   const remainingExports = Math.max(0, planConfig.exportLimit - exportCount);
-  const limitReached =
-    planConfig.exportLimit > 0 && exportCount >= planConfig.exportLimit;
+  const limitReached = planConfig.exportLimit > 0 && exportCount >= planConfig.exportLimit;
 
   const canExport = useMemo(
     () =>
       Boolean(
         videoFile &&
-          (keptSegments.length || removedSegments.length) &&
-          !limitReached
+        (keptSegments.length || removedSegments.length) &&
+        !limitReached
       ),
     [videoFile, keptSegments.length, removedSegments.length, limitReached]
   );
 
-  // ── Sync refs ─────────────────────────────────────────────────────────────
-  React.useEffect(() => { videoFileRef.current = videoFile; }, [videoFile]);
-  React.useEffect(() => { planIdRef.current = planId; exportLimitRef.current = planConfig.exportLimit; }, [planId, planConfig.exportLimit]);
-  React.useEffect(() => { exportCountRef.current = exportCount; }, [exportCount]);
-  React.useEffect(() => { onExportSuccessRef.current = onExportSuccess; }, [onExportSuccess]);
-  React.useEffect(() => { keptSegmentsRef.current = keptSegments; }, [keptSegments]);
-  React.useEffect(() => { removedSegmentsRef.current = removedSegments; }, [removedSegments]);
+  const currentQuality = QUALITY_OPTIONS.find((q) => q.id === quality)!;
 
-  // ── Load FFmpeg ────────────────────────────────────────────────────────────
-  const loadFfmpeg = async () => {
-    if (ffmpegRef.current) return;
-    const ffmpeg = new FFmpeg();
+  const exportVideos = useCallback(async (): Promise<{
+    success: boolean;
+    error?: string;
+  }> => {
+    const file = videoFileRef.current;
+    const kept = keptRef.current;
+    const removed = removedRef.current;
+    const curPlan = planIdRef.current;
+    const limit = limitRef.current;
+    const count = countRef.current;
 
-    ffmpeg.on("progress", ({ progress: p }) => {
-      setProgress(`${Math.round(p * 100)}%`);
-    });
-
-    const baseURLs = [
-      "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm",
-      "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm",
-    ];
-
-    let lastError: unknown = null;
-    for (const baseURL of baseURLs) {
-      try {
-        await ffmpeg.load({
-          coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-          wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
-          workerURL: await toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, "text/javascript"),
-        });
-        ffmpegRef.current = ffmpeg;
-        setIsReady(true);
-        return;
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    throw lastError ?? new Error("Failed to load FFmpeg");
-  };
-
-  // ── Export a single list of segments into one output MP4 ─────────────────
-  const exportSegments = async (
-    ffmpeg: FFmpeg,
-    inputName: string,
-    hasAudio: boolean,
-    segments: Segment[],
-    outputName: string,
-    label: string
-  ): Promise<string> => {
-    setProgress(`Building ${label}…`);
-
-    // Ensure the output file doesn't already exist in the virtual FS
-    try { await ffmpeg.deleteFile(outputName); } catch { /* ignore */ }
-
-    if (segments.length === 1) {
-      // Fast path: single segment — no concat needed, just trim
-      const seg = segments[0];
-      const args = [
-        "-y",
-        "-i", inputName,
-        "-ss", String(seg.start),
-        "-to", String(seg.end),
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        ...(hasAudio ? ["-c:a", "aac"] : ["-an"]),
-        outputName,
-      ];
-      await ffmpeg.exec(args);
-    } else {
-      // Multiple segments — use filter_complex with concat
-      const filter = buildFilter(segments, hasAudio);
-      const args = [
-        "-y",
-        "-i", inputName,
-        "-filter_complex", filter,
-        "-map", "[outv]",
-        ...(hasAudio ? ["-map", "[outa]"] : []),
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        ...(hasAudio ? ["-c:a", "aac"] : ["-an"]),
-        outputName,
-      ];
-      await ffmpeg.exec(args);
-    }
-
-    const data = await ffmpeg.readFile(outputName);
-    const blob = new Blob([data], { type: "video/mp4" });
-    return URL.createObjectURL(blob);
-  };
-
-  // ── Main export handler ────────────────────────────────────────────────────
-  const exportVideos = React.useCallback(async (): Promise<{ success: boolean; error?: string }> => {
-    const currentVideo = videoFileRef.current;
-    const currentKept = keptSegmentsRef.current;
-    const currentRemoved = removedSegmentsRef.current;
-    const currentPlanId = planIdRef.current;
-    const limit = exportLimitRef.current;
-    const count = exportCountRef.current;
-
-    if (!currentVideo) return { success: false, error: "No video loaded." };
-    if (isExportingRef.current) return { success: false, error: "Export already running." };
+    if (!file) return { success: false, error: "No video loaded." };
+    if (exportingRef.current) return { success: false, error: "Export already running." };
     if (limit > 0 && count >= limit) {
-      const msg = `Export limit reached for the ${PLAN_CONFIGS[currentPlanId].label} plan.`;
+      const msg = `Export limit reached for ${PLAN_CONFIGS[curPlan].label} plan.`;
       setError(msg);
       return { success: false, error: msg };
     }
-    if (!currentKept.length && !currentRemoved.length) {
+    if (!kept.length && !removed.length) {
       setError("No segments to export.");
       return { success: false, error: "No segments to export." };
     }
 
     setError(null);
-    isExportingRef.current = true;
+    exportingRef.current = true;
     setIsExporting(true);
-    setProgress("Loading FFmpeg…");
+    setProgressPct(0);
     setTrimmedResult(null);
     setRemovedResult(null);
 
+    const onProgress = (pct: number, label: string) => {
+      setProgressPct(pct);
+      setProgressMsg(label);
+    };
+
     try {
-      await loadFfmpeg();
-      const ffmpeg = ffmpegRef.current!;
+      const processSegments = async (
+        segs: Segment[],
+        label: string
+      ): Promise<ExportResult> => {
+        if (!segs.length) return null;
 
-      const inputName = "input.mp4";
-      setProgress("Writing input file…");
-      await ffmpeg.writeFile(inputName, await fetchFile(currentVideo));
+        const blob = useGPU
+          ? await exportWithWebCodecs(file, segs, currentQuality, label, onProgress)
+          : await exportWithFFmpeg(
+            ffmpegRef,
+            file,
+            segs,
+            `${label}.mp4`,
+            onProgress
+          );
 
-      // Probe once for audio
-      setProgress("Probing audio stream…");
-      const hasAudio = await probeHasAudio(ffmpeg, inputName);
+        const baseName = file.name.replace(/\.[^.]+$/, "");
+        return { url: URL.createObjectURL(blob), name: `${baseName}_${label}.mp4` };
+      };
 
-      if (currentKept.length) {
-        const url = await exportSegments(
-          ffmpeg, inputName, hasAudio, currentKept, "trimmed.mp4", "trimmed video"
-        );
-        const baseName = currentVideo.name.replace(/\.[^.]+$/, "");
-        setTrimmedResult({ url, name: `${baseName}_trimmed.mp4` });
-      }
+      onProgress(1, useGPU ? "Starting GPU export…" : "Starting export…");
 
-      if (currentRemoved.length) {
-        const url = await exportSegments(
-          ffmpeg, inputName, hasAudio, currentRemoved, "removed.mp4", "removed segments"
-        );
-        const baseName = currentVideo.name.replace(/\.[^.]+$/, "");
-        setRemovedResult({ url, name: `${baseName}_removed.mp4` });
-      }
+      console.log(
+        "%c[Export] Pipeline info",
+        "color:#818cf8;font-weight:bold",
+        {
+          pipeline: useGPU ? "Mediabunny WebCodecs Worker" : "FFmpeg.wasm",
+          videoCodec: useGPU ? currentQuality.codec : "libx264",
+          audioCodec: useGPU ? "mp4a.40.2 (AAC-LC)" : "aac",
+          quality: currentQuality.label,
+          bitrate: `${(currentQuality.bitrate / 1_000_000).toFixed(0)} Mbps`,
+          maxHeight: currentQuality.maxHeight ? `${currentQuality.maxHeight}p` : "original",
+          segments: { kept: kept.length, removed: removed.length },
+          audioEnc: audioEncAvailable(),
+          file: file.name,
+        }
+      );
 
-      setProgress("Done!");
-      onExportSuccessRef.current?.(currentPlanId);
+      // Process kept and removed sequentially (parallel would double memory pressure)
+      const trimmed = await processSegments(kept, "trimmed");
+      setTrimmedResult(trimmed);
+
+      const removed_ = await processSegments(removed, "removed");
+      setRemovedResult(removed_);
+
+      setProgressMsg("Done!");
+      setProgressPct(100);
+      successRef.current?.(curPlan);
       return { success: true };
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Export failed";
-      setError(message);
-      return { success: false, error: message };
+      const msg = err instanceof Error ? err.message : "Export failed";
+      setError(msg);
+      return { success: false, error: msg };
     } finally {
-      isExportingRef.current = false;
+      exportingRef.current = false;
       setIsExporting(false);
     }
-  }, []);
+  }, [useGPU, currentQuality]);
 
   React.useEffect(() => {
-    if (registerExporter) registerExporter(exportVideos);
+    registerExporter?.(exportVideos);
   }, [registerExporter, exportVideos]);
 
-  // ── UI ────────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5 shadow-2xl backdrop-blur-xl">
+      {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-1">
-          <div className="text-sm font-semibold text-zinc-200">Export</div>
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold text-zinc-200">Export</div>
+            <span
+              className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${useGPU
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : "border-zinc-700 text-zinc-500"
+                }`}
+            >
+              {useGPU ? "⚡ GPU" : "CPU"}
+            </span>
+          </div>
           <div className="text-[11px] text-zinc-500">
             {planConfig.label} plan — {remainingExports} of{" "}
             {planConfig.exportLimit} exports remaining
           </div>
         </div>
+
         <button
           type="button"
-          onClick={exportVideos}
+          onClick={() => void exportVideos()}
           disabled={!canExport || isExporting}
-          className="rounded-full bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-full bg-blue-600 px-5 py-2 text-xs font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isExporting
-            ? `Exporting… ${progress}`
-            : isReady
-            ? "Export Trimmed + Removed"
-            : "Load FFmpeg & Export"}
+          {isExporting ? "Exporting…" : "Export"}
         </button>
       </div>
+
+      {/* Quality selector */}
+      <div className="flex items-center gap-1 rounded-full border border-zinc-800 bg-zinc-950/60 p-1">
+        {QUALITY_OPTIONS.map((q) => (
+          <button
+            key={q.id}
+            type="button"
+            disabled={isExporting}
+            onClick={() => setQuality(q.id)}
+            className={`flex-1 rounded-full py-1 text-[11px] font-semibold transition ${quality === q.id
+                ? "bg-blue-600 text-white shadow"
+                : "text-zinc-400 hover:text-zinc-200"
+              }`}
+          >
+            {q.label}
+          </button>
+        ))}
+      </div>
+      <div className="text-[11px] text-zinc-500">
+        {currentQuality.desc}
+        {useGPU && " · hardware accelerated"}
+      </div>
+
+      {/* Progress */}
+      {isExporting && (
+        <div className="space-y-1.5">
+          <div className="flex justify-between text-[11px] text-zinc-400">
+            <span>{progressMsg}</span>
+            <span>{progressPct}%</span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-blue-500 to-emerald-400 transition-all duration-300"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {error && <div className="text-xs text-red-400">{error}</div>}
       {limitReached && (
@@ -319,56 +480,39 @@ export default function ExportPanel({
         </div>
       )}
 
+      {/* Result previews */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* Trimmed Export */}
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-zinc-400">Trimmed Export</div>
-          {trimmedResult ? (
-            <div className="space-y-2">
-              <video
-                src={trimmedResult.url}
-                className="w-full rounded-xl bg-black"
-                controls
-              />
-              <a
-                href={trimmedResult.url}
-                download={trimmedResult.name}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-600"
-              >
-                ⬇ Download {trimmedResult.name}
-              </a>
+        {(["trimmed", "removed"] as const).map((type) => {
+          const result = type === "trimmed" ? trimmedResult : removedResult;
+          const label = type === "trimmed" ? "Trimmed Export" : "Removed Export";
+          return (
+            <div key={type} className="space-y-2">
+              <div className="text-xs font-medium text-zinc-400">{label}</div>
+              {result ? (
+                <div className="space-y-2">
+                  <video
+                    src={result.url}
+                    className="w-full rounded-xl bg-black"
+                    controls
+                  />
+                  <a
+                    href={result.url}
+                    download={result.name}
+                    className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-600"
+                  >
+                    ⬇ {result.name}
+                  </a>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed border-zinc-700 bg-zinc-950/60 p-6 text-center text-xs text-zinc-500">
+                  {isExporting && type === "trimmed"
+                    ? progressMsg
+                    : `Export to generate ${type} video.`}
+                </div>
+              )}
             </div>
-          ) : (
-            <div className="rounded-xl border border-dashed border-zinc-700 bg-zinc-950/60 p-6 text-center text-xs text-zinc-500">
-              {isExporting ? progress || "Processing…" : "Export to generate trimmed video."}
-            </div>
-          )}
-        </div>
-
-        {/* Removed Export */}
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-zinc-400">Removed Export</div>
-          {removedResult ? (
-            <div className="space-y-2">
-              <video
-                src={removedResult.url}
-                className="w-full rounded-xl bg-black"
-                controls
-              />
-              <a
-                href={removedResult.url}
-                download={removedResult.name}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-600"
-              >
-                ⬇ Download {removedResult.name}
-              </a>
-            </div>
-          ) : (
-            <div className="rounded-xl border border-dashed border-zinc-700 bg-zinc-950/60 p-6 text-center text-xs text-zinc-500">
-              {isExporting ? progress || "Processing…" : "Export to generate removed segments video."}
-            </div>
-          )}
-        </div>
+          );
+        })}
       </div>
     </div>
   );

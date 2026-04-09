@@ -1,17 +1,17 @@
 {
-  "savedAt": "2026-04-09T16:40:57.338Z",
+  "savedAt": "2026-04-09T20:11:11.640Z",
   "request": {
-    "message": "hi",
+    "message": "please take out the part from 1:00 to 2:00",
     "video": {
-      "name": "WhatsApp Video 2026-04-09 at 5.41.47 PM.mp4",
+      "name": "2026_Renault_Duster_-_Feature_Loaded_With_3_Engine_Options_Faisal_Khan_720P.mp4",
       "type": "video/mp4",
-      "sizeBytes": 117478477,
-      "duration": 762.7,
+      "sizeBytes": 117877976,
+      "duration": 762.666667,
       "width": 1280,
       "height": 720,
       "currentTime": 0,
       "trimStartSeconds": 0,
-      "trimEndSeconds": 762.7,
+      "trimEndSeconds": 762.666667,
       "isEditorMode": false
     },
     "history": [
@@ -21,18 +21,34 @@
       },
       {
         "role": "user",
-        "content": "hi"
+        "content": "remove 1:00 to 2:00"
+      },
+      {
+        "role": "assistant",
+        "content": "Trim queued: 1:00-2:00."
+      },
+      {
+        "role": "user",
+        "content": "please take out the part from 1:00 to 2:00"
       }
     ]
   },
   "response": {
-    "raw": "Hi! 👋  \nI can help you edit your video. What would you like to do today? For example: trim a part, split a clip, adjust volume, or export? Let me know what you have in mind!",
-    "formatter": "{\n  \"assistant_message\": \"Hi! 👋\\nI can help you edit your video. What would you like to do today? For example: trim a part, split a clip, adjust volume, or export? Let me know what you have in mind!\",\n  \"status\": \"needs_info\",\n  \"follow_up\": \"Please specify what editing action you'd like to perform (e.g., trim, split, volume adjustment, export) and any relevant details like start/end times or clip numbers.\",\n  \"actions\": []\n}",
+    "raw": "Trim queued: 1:00-2:00.",
+    "formatter": "{\"assistant_message\": \"Trim queued: 1:00-2:00.\", \"status\": \"ok\", \"follow_up\": null, \"actions\": [{\"type\": \"trim\", \"start\": 60, \"end\": 120, \"clip\": null, \"reason\": \"User requested to take out the part from 1:00 to 2:00\"}]}",
     "parsed": {
-      "assistant_message": "Hi! 👋\nI can help you edit your video. What would you like to do today? For example: trim a part, split a clip, adjust volume, or export? Let me know what you have in mind!",
-      "status": "needs_info",
-      "follow_up": "Please specify what editing action you'd like to perform (e.g., trim, split, volume adjustment, export) and any relevant details like start/end times or clip numbers.",
-      "actions": []
+      "assistant_message": "Trim queued: 1:00-2:00.",
+      "status": "ok",
+      "follow_up": null,
+      "actions": [
+        {
+          "type": "trim",
+          "start": 60,
+          "end": 120,
+          "clip": null,
+          "reason": "User requested to take out the part from 1:00 to 2:00"
+        }
+      ]
     }
   }
 }

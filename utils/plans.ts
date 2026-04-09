@@ -36,7 +36,7 @@ export const PLAN_CONFIGS: Record<PlanId, PlanConfig> = {
     },
     clips: {
       allowSuggestions: false,
-      allowAutoApply: false,
+      allowAutoApply: true,
     },
     mediaBreakdown: "locked",
     analysis: {
@@ -57,7 +57,7 @@ export const PLAN_CONFIGS: Record<PlanId, PlanConfig> = {
     },
     clips: {
       allowSuggestions: true,
-      allowAutoApply: false,
+      allowAutoApply: true,
     },
     mediaBreakdown: "audio",
     analysis: {
