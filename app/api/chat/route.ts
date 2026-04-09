@@ -90,8 +90,8 @@ function parseTimestampToSeconds(token: string): number | null {
 function extractRangeFromText(text: string) {
   const matches = text.match(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g) ?? [];
   if (matches.length < 2) return null;
-  const start = parseTimestampToSeconds(matches[0]);
-  const end = parseTimestampToSeconds(matches[1]);
+  const start = parseTimestampToSeconds(matches[0]!);
+  const end = parseTimestampToSeconds(matches[1]!);
   if (start === null || end === null || start >= end) return null;
   return { start, end };
 }
