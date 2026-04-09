@@ -1091,7 +1091,7 @@ export default function Chat({
         data?.choices?.[0]?.message?.content ||
         "No response from AI";
 
-      const parsedActions = data?.parsed?.actions;
+      const parsedActions = data?.parsed?.actions as ModelAction[] | undefined;
       let appliedCount = 0;
       if (allowAutoApply) {
         appliedCount = applyActionsFromJson(parsedActions);
